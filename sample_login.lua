@@ -45,12 +45,24 @@ function save_db(r, db)
 		fp:close()
 	else
 		r:err("DB save error " .. SES_DB)
-		return nil
+		return false
 	end
 
 	return true
 end
 
+-- セッションデータを登録する
+function register_session(r, id, data)
+
+	local ses_db = load_db(r)
+
+	if ses_db then
+		ses_db[id] = data
+		return save_db(r, ses_db)
+	end
+
+	return false
+end
 
 -- リクエストパスとセッションクッキーに応じてURL書き換えなど処理する
 -- translate_nameフックに登録される前提
@@ -60,7 +72,7 @@ function translate(r)
 	if not r.is_initial_req then return apache2.DECLINED end
 
 	-- ログインリクエストはtranslate_nameフックでは処理しない
-	if r.unparsed_uri == LOGIN_REQ_URL then
+	if r.uri == LOGIN_REQ_URL then
 		return apache2.DECLINED
 	end
 
@@ -69,46 +81,38 @@ function translate(r)
 	r.headers_out["Pragma"] = "no-cache"
 	r.headers_out["Expires"] = "0"
 
-	-- ログアウトリクエストを処理する
-	if r.unparsed_uri == LOGOUT_REQ_URL then
-
-		-- セッションクッキーを削除する
+	-- ログアウトリクエストなら、クッキーを削除する
+	if r.uri == LOGOUT_REQ_URL then
 		r:setcookie{
 			key = SES_COOKIE_NAME,
 			value = "deleted",
 			expires = 1,
 			path = '/'
 		}
-
-		-- リクエストURLをログアウトページに書き換える
-		r.uri = LOGOUT_PAGE
+		r.uri = LOGOUT_PAGE    -- ログアウトページに遷移
 		return apache2.DECLINED
 	end
 
-	-- セッションクッキーがなければ、ログインページへ遷移させる
+	-- セッションクッキーの値を取得する
 	local cookie = r:getcookie(SES_COOKIE_NAME)
 	if not cookie then
-		r:err("no cookie")
 		r.uri = LOGIN_PAGE
 		return apache2.DECLINED
 	end
 
-	-- セッションクッキーを登録しているyamlファイルの中身を読みだす
+	-- セッションDBを読み込む
 	local ses_db = load_db(r)
 	if not ses_db then
 		return 500
 	end
 
-	-- クッキーの値をキーにして、ユーザ名を取得する
-	-- セッションDBに登録がない場合は、ログインページに遷移させる
+	-- セッションDBからnameを取得してカスタムヘッダに出力する
 	local user_name = ses_db[cookie]
 	if not user_name then
-		r:err("not registered: " .. cookie)
-		r.uri = LOGIN_PAGE
-		return apache2.DECLINED
+		r.uri = LOGIN_PAGE    -- 未登録ならログインページに遷移
+	else
+		r.headers_in["x-sample-login-user-name"] = user_name
 	end
-
-	r.headers_in["x-sample-login-user-name"] = user_name
 	return apache2.DECLINED
 end
 
@@ -120,26 +124,15 @@ function login_handler(r)
 	-- POSTを読みだして分解する
 	local post = r:parsebody(1024)
 	if not post then return 403 end
-
 	if not post['name'] then return 403 end
-	r:err("login_handler() start name:" .. post['name'])
-
-	-- セッションクッキーを登録しているyamlファイルの中身を読みだす
-	local ses_db = load_db(r)
-	if not ses_db then
-		return 500
-	end
 
 	-- セッションIDを作成する
-	local msec = r:clock()	-- マイクロ秒までとれる
-	math.randomseed(msec)
+	math.randomseed( r:clock() )
 	local rnum = math.random(1, 999999999)
 	local sesid = "A" .. r:sha1(tostring(rnum))
 
-	ses_db[sesid] = post['name']
-
 	-- セッションIDをDBに保存する
-	if not save_db(r, ses_db) then
+	if not register_session(r, sesid, post['name']) then
 		return 500
 	end
 
